@@ -50,8 +50,15 @@ class CircularConv2D(layers.Layer):
     def __init__(self, filters, kernel_size, strides=1, activation=None, use_bias=False, **kwargs):
         super().__init__(**kwargs)
         self.filters = filters
-        self.kernel_size = kernel_size if isinstance(kernel_size, tuple) else (kernel_size, kernel_size)
-        self.strides = strides
+        if isinstance(kernel_size, (tuple, list)):
+            self.kernel_size = (int(kernel_size[0]), int(kernel_size[1]))
+        else:
+            self.kernel_size = (int(kernel_size), int(kernel_size))
+
+        if isinstance(strides, (tuple, list)):
+            self.strides = (int(strides[0]), int(strides[1]))
+        else:
+            self.strides = int(strides)
         self._activation_name = activation
         self.activation = keras.activations.get(activation)
         self.use_bias = use_bias
@@ -64,8 +71,8 @@ class CircularConv2D(layers.Layer):
         self.pad_layer = CircularPad2D(self._pad_amount)
         self.conv = layers.Conv2D(
             filters=filters,
-            kernel_size=kernel_size,
-            strides=strides,
+            kernel_size=self.kernel_size,
+            strides=self.strides,
             padding='valid',
             activation=None,
             use_bias=use_bias
