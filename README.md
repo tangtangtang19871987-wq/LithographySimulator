@@ -22,6 +22,85 @@ Right now, although it mostly works, a lot could still be done to improve it. Ex
 - [ ] 2D solver for lithography recipe generation
 - [x] Allow for more complicated light sources like quasar or quadrupole
 
+## Added Research Utilities
+
+This fork includes TensorFlow training and model-interpretability utilities for
+shift-equivariant U-Net style models.
+
+### 1) CNN/U-Net explanation tool (Grad-CAM family)
+
+Script: `explain_cnn_visualization.py`
+
+- Supports:
+  - Grad-CAM
+  - Guided Grad-CAM
+  - Score-CAM
+- Outputs:
+  - per-sample PNGs
+  - panel PNG
+  - per-sample JSON report
+  - optional batch summary JSON + batch grid PNG
+
+Example:
+
+```bash
+python explain_cnn_visualization.py \
+  --model litho_model_780_e200.keras \
+  --dataset litho_dataset_780.npz \
+  --sample-idx 0 \
+  --batch-count 8 \
+  --batch-grid-png \
+  --output-dir explain_outputs_batch
+```
+
+Reference guide:
+
+- `CNN_VISUALIZATION_GUIDE.md`
+
+### 2) Layer feature/kernel inspector
+
+Script: `visualize_layer_features_kernels.py`
+
+- For a user-specified layer:
+  - visualize feature maps for a specific input sample
+  - visualize kernels (if available)
+  - export layer-level JSON report
+
+Example:
+
+```bash
+python visualize_layer_features_kernels.py \
+  --model litho_model_780_e200.keras \
+  --dataset litho_dataset_780.npz \
+  --sample-idx 0 \
+  --layer circular_conv2d_3 \
+  --output-dir layer_viz
+```
+
+### 3) Improved experiment logging and safe stop
+
+Script: `train.py`
+
+- Added run-based experiment directory organization.
+- Writes:
+  - `run_config.json`
+  - `training_log.csv`
+  - `epoch_metrics.jsonl`
+  - `run_summary.json`
+  - model snapshots (best/final/interrupted)
+- Handles Ctrl+C / SIGTERM gracefully by saving latest artifacts at epoch boundary.
+
+Example:
+
+```bash
+python train.py \
+  --dataset litho_dataset_780.npz \
+  --epochs 200 \
+  --batch-size 8 \
+  --experiment-dir experiments \
+  --run-name exp_780_e200
+```
+
 ## Acknowledgment and Citations
 1. T.-S. Gau et al., “Ultra-fast aerial image simulation algorithm using wavelength scaling and fast Fourier transformation to speed up calculation by more than three orders of magnitude,” JM3 22(2), 023201, SPIE (2023) [doi:10.1117/1.JMM.22.2.023201].
 

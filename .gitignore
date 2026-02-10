@@ -12,3 +12,15 @@ sanity_check.png
 predictions.png
 training_history.png
 shift_equivariance_test.png
+shift_equivariance_inference_report.json
+
+# Local experiment artifacts
+experiments_test/
+explain_outputs/
+explain_outputs_batch/
+explain_outputs_batch2/
+layer_viz/
+dataset_viz/
+shift_equivariance_viz/
+*.log
+*.pid
