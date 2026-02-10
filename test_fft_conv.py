@@ -1,8 +1,8 @@
 """Smoke tests for FFT-based circular depthwise convolution.
 
-Verifies that the FFT path produces numerically close results to the
-spatial (CircularPad + DepthwiseConv2D) path for various kernel sizes,
-spatial dimensions, and channel counts.
+Verifies that the FFT path (fft_conv.py / fft_layers.py) produces
+numerically close results to the spatial (CircularPad + DepthwiseConv2D)
+path for various kernel sizes, spatial dimensions, and channel counts.
 
 Run:
     python test_fft_conv.py
@@ -37,11 +37,6 @@ def spatial_circular_depthwise_conv1d(x, kernel_1d_per_channel, axis_name):
 
     pad_layer = CircularPad1D(half, axis=axis_name)
     x_padded = pad_layer(x)
-
-    if axis_name == 'width':
-        dw_kernel_shape = (1, K, C, 1)
-    else:
-        dw_kernel_shape = (K, 1, C, 1)
 
     dw_conv = layers.DepthwiseConv2D(
         kernel_size=(1, K) if axis_name == 'width' else (K, 1),
@@ -108,9 +103,10 @@ def test_fft_conv_circular_property(kernel_size=31, size=64, channels=8):
     return max_err < 1e-5, max_err
 
 
-def test_axis_circular_conv_fft_vs_spatial():
-    """End-to-end test: AxisCircularConv with FFT vs without FFT."""
+def test_fft_layer_vs_spatial_layer():
+    """End-to-end: FFTAxisCircularConv vs original AxisCircularConv."""
     from shift_equivariant_unet import AxisCircularConv
+    from fft_layers import FFTAxisCircularConv
 
     K = 31
     C_in = 16
@@ -119,14 +115,12 @@ def test_axis_circular_conv_fft_vs_spatial():
     B = 2
     x = tf.random.normal([B, H, W, C_in])
 
-    # Build FFT variant (default, threshold=11, kernel=31 → uses FFT)
-    layer_fft = AxisCircularConv(C_out, axis='width', kernel_size=K,
-                                 fft_threshold=11)
+    # Build FFT layer
+    layer_fft = FFTAxisCircularConv(C_out, axis='width', kernel_size=K)
     _ = layer_fft(x)  # build
 
-    # Build spatial variant (set threshold very high to force spatial)
-    layer_spatial = AxisCircularConv(C_out, axis='width', kernel_size=K,
-                                    fft_threshold=999)
+    # Build spatial layer
+    layer_spatial = AxisCircularConv(C_out, axis='width', kernel_size=K)
     _ = layer_spatial(x)  # build
 
     # Copy depthwise kernel from FFT layer to spatial layer
@@ -144,12 +138,31 @@ def test_axis_circular_conv_fft_vs_spatial():
     diff = tf.abs(out_fft - out_spatial)
     max_err = float(tf.reduce_max(diff))
     mean_err = float(tf.reduce_mean(diff))
-    passed = max_err < 1e-3  # allow slightly larger tolerance due to pw_conv
+    passed = max_err < 1e-3
     return passed, max_err, mean_err
 
 
-def test_model_builds_and_runs():
-    """Verify that the full model builds and runs forward pass with FFT conv."""
+def test_fft_layer_in_model():
+    """Verify FFTAxisCircularConv works inside a Keras Functional model."""
+    from fft_layers import FFTAxisCircularConv
+    from shift_equivariant_unet import GELUApprox
+
+    inp = tf.keras.Input(shape=(32, 32, 16))
+    x = FFTAxisCircularConv(16, axis='width', kernel_size=31)(inp)
+    x = GELUApprox()(x)
+    x = FFTAxisCircularConv(16, axis='height', kernel_size=31)(x)
+    x = tf.keras.layers.Conv2D(1, 1, activation='sigmoid')(x)
+    model = tf.keras.Model(inp, x)
+
+    x_in = tf.random.normal([1, 32, 32, 16])
+    out = model(x_in, training=False)
+    shape_ok = out.shape == (1, 32, 32, 1)
+    range_ok = float(tf.reduce_min(out)) >= 0.0 and float(tf.reduce_max(out)) <= 1.0
+    return shape_ok and range_ok, out.shape
+
+
+def test_original_model_unchanged():
+    """Verify original TokenizedMLP model still builds with spatial conv."""
     from model_tokenized_mlp import build_model
     model = build_model(input_shape=(32, 32, 1), num_filters_base=16,
                         num_mlp_blocks=1, axis_kernel=31)
@@ -205,19 +218,28 @@ def main():
     if not passed:
         all_passed = False
 
-    # Test 3: AxisCircularConv FFT vs spatial (end-to-end layer test)
-    print("\n[Test 3] AxisCircularConv: FFT path vs spatial path")
+    # Test 3: FFTAxisCircularConv vs AxisCircularConv (end-to-end layer test)
+    print("\n[Test 3] FFTAxisCircularConv vs AxisCircularConv (same weights)")
     print("-" * 65)
-    passed, max_err, mean_err = test_axis_circular_conv_fft_vs_spatial()
+    passed, max_err, mean_err = test_fft_layer_vs_spatial_layer()
     status = "PASS" if passed else "FAIL"
     print(f"  max_err={max_err:.2e}  mean_err={mean_err:.2e}  [{status}]")
     if not passed:
         all_passed = False
 
-    # Test 4: Full model build + forward pass
-    print("\n[Test 4] Full TokenizedMLP model build & forward pass")
+    # Test 4: FFTAxisCircularConv inside a Keras Functional model
+    print("\n[Test 4] FFTAxisCircularConv in Keras Functional model")
     print("-" * 65)
-    passed, shape = test_model_builds_and_runs()
+    passed, shape = test_fft_layer_in_model()
+    status = "PASS" if passed else "FAIL"
+    print(f"  Output shape: {shape}  [{status}]")
+    if not passed:
+        all_passed = False
+
+    # Test 5: Original model unchanged (still uses spatial conv)
+    print("\n[Test 5] Original TokenizedMLP model unchanged")
+    print("-" * 65)
+    passed, shape = test_original_model_unchanged()
     status = "PASS" if passed else "FAIL"
     print(f"  Output shape: {shape}  [{status}]")
     if not passed:
