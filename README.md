@@ -34,3 +34,33 @@ Note: It is very important to note that the prior paper, Gao 2023, provided the 
 6. P. Evanschitzky, A. Erdmann, and T. Fuehner, “Extended Abbe approach for fast and accurate lithography imaging simulations,” in 25th European Mask and Lithography Conference, pp. 1–11 (2009) [doi:10.1117/12.835168].
 7. E. Hecht, Optics, Pearson Education, Incorporated (2017).
 8. C. Mack, Fundamental Principles of Optical Lithography: The Science of Microfabrication, John Wiley & Sons (2008).
+
+## DSP / 频谱分析教程（中文）
+
+仓库新增了面向初学者的 FFT/小波/采样/窗口/滤波避坑教程与配套代码：
+
+- 教程文档：`docs/dsp_fft_wavelet_tutorial_zh.md`
+- 实验脚本：`dsp_spectrum_tutorial.py`
+- 最小测试：`test_dsp_spectrum_tutorial.py`
+
+快速运行：
+
+```bash
+python dsp_spectrum_tutorial.py
+python test_dsp_spectrum_tutorial.py
+```
+
+
+## ILT 频谱损失函数指南（中文）
+
+新增了面向光刻 ILT 的频谱损失实施指南与可运行示例：
+
+- 指南文档：`docs/ilt_spectral_loss_guide_zh.md`
+- 参考实现：`ilt_spectral_loss.py`
+- 测试脚本：`test_ilt_spectral_loss.py`
+
+```bash
+python ilt_spectral_loss.py
+python test_ilt_spectral_loss.py
+```
+
