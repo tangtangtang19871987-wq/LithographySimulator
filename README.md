@@ -101,6 +101,24 @@ python train.py \
   --run-name exp_780_e200
 ```
 
+
+### 4) SAOT (Spectral Attention Operator Transformer) for PDE-like operator learning
+
+Script/module: `model_saot.py`
+
+- Implements a hybrid spectral architecture in TensorFlow:
+  - Fourier Attention (global dependency modeling)
+  - Wavelet Attention (Haar wavelet local/high-frequency modeling)
+  - Gated fusion between global and local spectral paths
+- Provides `build_saot_model(...)` for input/output grids with the same spatial resolution
+  (e.g., Darcy 85×85 coefficient field → 85×85 pressure field).
+
+Smoke test:
+
+```bash
+python test_saot_model.py
+```
+
 ## Acknowledgment and Citations
 1. T.-S. Gau et al., “Ultra-fast aerial image simulation algorithm using wavelength scaling and fast Fourier transformation to speed up calculation by more than three orders of magnitude,” JM3 22(2), 023201, SPIE (2023) [doi:10.1117/1.JMM.22.2.023201].
 
