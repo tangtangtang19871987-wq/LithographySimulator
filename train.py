@@ -36,6 +36,11 @@ from shift_equivariant_unet import (
     CircularConv2D,
     DilatedCircularConv2D,
 )
+from physical_guidance import (
+    CoherentDipolePhysicsLayer,
+    PhysicsFuse,
+    PhysicsOutputBlend,
+)
 from data_pipeline import (
     generate_dataset,
     save_dataset,
@@ -91,45 +96,58 @@ def _resolve_path(base_dir, path):
 
 
 def build_model(input_shape=(64, 64, 1), num_filters_base=32):
-    """Build a smaller shift-equivariant U-Net for 64x64 litho data.
+    """Build physics-guided shift-equivariant U-Net for lithography data.
 
-    Uses reduced filter counts compared to the full model since
-    64x64 inputs don't need as much capacity.
+    Adds a fixed coherent-dipole physics layer and fuses it into:
+      1) input stem,
+      2) every encoder/decoder stage,
+      3) output blending.
+
+    Fusion layers enforce a minimum physics contribution so the model cannot
+    completely forget the physical prior during training.
     """
     inputs = keras.Input(shape=input_shape)
 
+    physics_map = CoherentDipolePhysicsLayer(name='physics_dipole')(inputs)
+    x = keras.layers.Concatenate(name='input_with_physics')([inputs, physics_map])
+
     # Encoder
-    x = CircularConv2D(num_filters_base, 3, activation='relu')(inputs)
     x = CircularConv2D(num_filters_base, 3, activation='relu')(x)
-    feat1 = x
+    x = CircularConv2D(num_filters_base, 3, activation='relu')(x)
+    feat1 = PhysicsFuse(name='physics_fuse_enc1')([x, physics_map])
 
     x = DilatedCircularConv2D(num_filters_base * 2, dilation_rate=2)(feat1)
     x = DilatedCircularConv2D(num_filters_base * 2, dilation_rate=2)(x)
-    feat2 = x
+    feat2 = PhysicsFuse(name='physics_fuse_enc2')([x, physics_map])
 
     x = DilatedCircularConv2D(num_filters_base * 4, dilation_rate=4)(feat2)
     x = DilatedCircularConv2D(num_filters_base * 4, dilation_rate=4)(x)
-    feat3 = x
+    feat3 = PhysicsFuse(name='physics_fuse_enc3')([x, physics_map])
 
     # Bottleneck
     x = DilatedCircularConv2D(num_filters_base * 8, dilation_rate=8)(feat3)
     x = DilatedCircularConv2D(num_filters_base * 8, dilation_rate=8)(x)
+    x = PhysicsFuse(name='physics_fuse_bottleneck')([x, physics_map])
 
     # Decoder
     x = keras.layers.Concatenate()([x, feat3])
     x = DilatedCircularConv2D(num_filters_base * 4, dilation_rate=4)(x)
     x = DilatedCircularConv2D(num_filters_base * 4, dilation_rate=4)(x)
+    x = PhysicsFuse(name='physics_fuse_dec3')([x, physics_map])
 
     x = keras.layers.Concatenate()([x, feat2])
     x = DilatedCircularConv2D(num_filters_base * 2, dilation_rate=2)(x)
     x = DilatedCircularConv2D(num_filters_base * 2, dilation_rate=2)(x)
+    x = PhysicsFuse(name='physics_fuse_dec2')([x, physics_map])
 
     x = keras.layers.Concatenate()([x, feat1])
     x = CircularConv2D(num_filters_base, 3, activation='relu')(x)
     x = CircularConv2D(num_filters_base, 3, activation='relu')(x)
+    x = PhysicsFuse(name='physics_fuse_dec1')([x, physics_map])
 
-    # Output: single channel, sigmoid for [0,1] range
-    outputs = CircularConv2D(1, 1, activation='sigmoid')(x)
+    # Output: learned head + physics residual blend (with min physics floor)
+    pred = CircularConv2D(1, 1, activation='sigmoid', name='learned_output')(x)
+    outputs = PhysicsOutputBlend(name='physics_output_blend')([pred, physics_map])
 
     model = keras.Model(inputs=inputs, outputs=outputs,
                         name='litho_unet')
