@@ -1,0 +1,9 @@
+# Lithography demo recipe
+#@param sigma_out unit=none
+SigmaOut = 0.92;
+
+#@param dose_mj unit=mJ
+Dose = 26.0;
+
+#@param focus_nm unit=nm
+Focus = 15.0;
