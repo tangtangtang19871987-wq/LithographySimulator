@@ -1,115 +1,168 @@
-## About
-LithographySimulator is an open-source tool/toy for modeling optical lithography. 
+# Lithography Workflow Assistant Demo
 
-Currently, it simulates partial coherence imaging with the Abbe formulation, Fraunhofer mask diffraction with binary masks, support for annular, quasar, and classical light sources, and arbitrary aberration modeling.
+This repository now includes a **complete Python demo** for a constrained lithography workflow assistant.
 
-Depending on device support it uses PyTorch for GPU or CPU acceleration and can be reasonably agile when computing the aerial image. The main limiting factor will be VRAM or system RAM, as the current approach is very memory intensive.
+## What was added
 
-![image](https://github.com/user-attachments/assets/bd68ebfc-20ad-4fec-95bf-31748b02c3e5)
+- Subprocess-based external simulator launch (`simulate_stub.py`) through deterministic monitoring (`job_runner.py`).
+- Text recipe editing that only updates assignment lines immediately after `#@param` tags (`recipe_tools.py`).
+- Skill package import from `skills/*/SKILL.md` with YAML front matter parsing and tool binding (`skill_loader.py`).
+- Registry-driven tool validation and per-skill tool restriction (`tool_registry.py`).
+- NPZ result summary extraction + API validation (with `mock://validate`) (`analysis_tools.py`).
+- Thin orchestration layer that exposes only approved tools to LangChain (`app.py`).
 
-![imgtt](https://github.com/user-attachments/assets/926141f3-e007-49c6-bcbc-21bd08f8942b)
+---
 
+## Architecture
 
-## Goals
-Right now, although it mostly works, a lot could still be done to improve it. Expect that much of this is incomplete in perpetuity, however, I do look over the code from time to time. Never say never!
+### 1) Constrained recipe editing
 
-- [x] Refactor architecture to be more usable (Objects, perhaps, rather than the current approach with haphazard application of global variables)
-- [x] Add support for Zernike polynomial modeling of optical wavefront error for the pupil function. Currently, only defocus is supported
-- [ ] Validate the correctness of the lithography model, either by testing against known-correct models or through formally validating the mathematics inside the program.
-- [x] Add FFT approximation as appears in [1] alongside the classical solver
-- [ ] Add GDSII/OASIS import
-- [ ] Add photoresist response modeling, simple or otherwise
-- [ ] 2D solver for lithography recipe generation
-- [x] Allow for more complicated light sources like quasar or quadrupole
+`recipe_tools.py` implements two safe operations:
 
-## Added Research Utilities
+- `list_recipe_params(recipe_path)`
+- `modify_recipe_by_tag(recipe_path, tag, new_value, output_path=None)`
 
-This fork includes TensorFlow training and model-interpretability utilities for
-shift-equivariant U-Net style models.
+Why constrained?
 
-### 1) CNN/U-Net explanation tool (Grad-CAM family)
+- Recipes are process-control artifacts. Allowing free-form edits from LLM output is unsafe.
+- The editor only modifies the **single assignment line immediately after the matching** `#@param` tag.
+- Source recipes are never overwritten; output is always a copied file.
 
-Script: `explain_cnn_visualization.py`
+### 2) Deterministic job monitoring
 
-- Supports:
-  - Grad-CAM
-  - Guided Grad-CAM
-  - Score-CAM
-- Outputs:
-  - per-sample PNGs
-  - panel PNG
-  - per-sample JSON report
-  - optional batch summary JSON + batch grid PNG
+`job_runner.py` launches `simulate_stub.py` with `subprocess.Popen`, then polls at a fixed interval.
 
-Example:
+State machine:
+
+- `pending`
+- `running`
+- `finished`
+- `failed`
+- `invalid`
+- `timeout`
+
+Validation checks include:
+
+- process return code
+- timeout
+- log scanning for error patterns
+- output file existence
+- output file size > 0
+- NPZ readability
+- numerical sanity (finite and non-constant)
+
+Why deterministic?
+
+- Polling logic is fixed, explicit, and not delegated to an LLM.
+- Validation rules are explicit code checks and reproducible.
+
+### 3) Result analysis + API validation
+
+`analysis_tools.py` reads NPZ results and returns:
+
+- `source`
+- `shape`
+- `min`, `max`, `mean`, `std`
+- `has_nan`, `has_inf`
+- `center_cd_px`
+- `hotspot_ratio`
+- `binary_area_ratio`
+
+`call_validation_api()` supports:
+
+- `mock://validate` deterministic local validation
+- HTTP POST JSON validation via `requests`
+
+`build_validation_report()` combines job state + local summary + API verdict into a final report.
+
+### 4) Skill markdown import + tool binding
+
+`skill_loader.py` loads `skills/*/SKILL.md` and parses YAML front matter fields:
+
+- `name`
+- `description`
+- `triggers`
+- `tools`
+
+Then:
+
+- skills are routed by trigger matching
+- declared tools are validated against `ToolRegistry`
+- only selected-skill tools are exposed to agent mode
+
+### 5) LangChain as a thin orchestration layer
+
+`app.py` registers these tools:
+
+- `list_recipe_params`
+- `modify_recipe_by_tag`
+- `run_litho_workflow`
+- `extract_litho_summary`
+- `call_validation_api`
+
+LLM cannot directly rewrite files or control polling internals; it can only call bound tools.
+
+---
+
+## Files
+
+- `app.py`
+- `recipe_tools.py`
+- `job_runner.py`
+- `analysis_tools.py`
+- `agent_tools.py`
+- `skill_loader.py`
+- `tool_registry.py`
+- `simulate_stub.py`
+- `skills/litho_recipe_edit/SKILL.md`
+- `skills/litho_result_validate/SKILL.md`
+- `skills/log_triage/SKILL.md`
+- `sample_data/base_recipe.rcp`
+- `sample_data/sample_layout.gds`
+
+---
+
+## Run instructions
+
+### Install
 
 ```bash
-python explain_cnn_visualization.py \
-  --model litho_model_780_e200.keras \
-  --dataset litho_dataset_780.npz \
-  --sample-idx 0 \
-  --batch-count 8 \
-  --batch-grid-png \
-  --output-dir explain_outputs_batch
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-Reference guide:
-
-- `CNN_VISUALIZATION_GUIDE.md`
-
-### 2) Layer feature/kernel inspector
-
-Script: `visualize_layer_features_kernels.py`
-
-- For a user-specified layer:
-  - visualize feature maps for a specific input sample
-  - visualize kernels (if available)
-  - export layer-level JSON report
-
-Example:
+### Deterministic demo mode
 
 ```bash
-python visualize_layer_features_kernels.py \
-  --model litho_model_780_e200.keras \
-  --dataset litho_dataset_780.npz \
-  --sample-idx 0 \
-  --layer circular_conv2d_3 \
-  --output-dir layer_viz
+python app.py --mode deterministic-demo
 ```
 
-### 3) Improved experiment logging and safe stop
+This will:
 
-Script: `train.py`
+1. list recipe params
+2. edit `sigma_out` into a copied recipe
+3. launch simulator stub via subprocess
+4. monitor and validate outputs
+5. summarize NPZ + call `mock://validate`
+6. print combined JSON report
 
-- Added run-based experiment directory organization.
-- Writes:
-  - `run_config.json`
-  - `training_log.csv`
-  - `epoch_metrics.jsonl`
-  - `run_summary.json`
-  - model snapshots (best/final/interrupted)
-- Handles Ctrl+C / SIGTERM gracefully by saving latest artifacts at epoch boundary.
-
-Example:
+### Skill-loaded agent mode
 
 ```bash
-python train.py \
-  --dataset litho_dataset_780.npz \
-  --epochs 200 \
-  --batch-size 8 \
-  --experiment-dir experiments \
-  --run-name exp_780_e200
+export OPENAI_API_KEY=...  # required for live LLM tool-calling
+python app.py --mode agent --query "Edit sigma and run workflow validation"
 ```
 
-## Acknowledgment and Citations
-1. T.-S. Gau et al., “Ultra-fast aerial image simulation algorithm using wavelength scaling and fast Fourier transformation to speed up calculation by more than three orders of magnitude,” JM3 22(2), 023201, SPIE (2023) [doi:10.1117/1.JMM.22.2.023201].
+The app loads all skills from `skills/*/SKILL.md`, chooses the best trigger match, and restricts visible tools to that skill.
 
-Note: It is very important to note that the prior paper, Gao 2023, provided the starting code for this project. The original MATLAB code is available on request from the corresponding author. I translated the code into Python in a sensible manner and improved performance, but the physics underlying this model is owed in large, but not complete, part to this paper's code.
+---
 
-2. B. J. Lin, Optical Lithography: Here is why, SPIE (2021).
-3. X. Wu et al., “Efficient source mask optimization with Zernike polynomial functions for source representation,” Opt. Express, OE 22(4), 3924–3937, Optica Publishing Group (2014) [doi:10.1364/OE.22.003924].
-4. N. B. Cobb, “Fast optical and process proximity correction algorithms for integrated circuit manufacturing,” PhD, University of California, Berkeley (1998).
-5. M. Guthaus, “mguthaus/DimmiLitho,” (2021).
-6. P. Evanschitzky, A. Erdmann, and T. Fuehner, “Extended Abbe approach for fast and accurate lithography imaging simulations,” in 25th European Mask and Lithography Conference, pp. 1–11 (2009) [doi:10.1117/12.835168].
-7. E. Hecht, Optics, Pearson Education, Incorporated (2017).
-8. C. Mack, Fundamental Principles of Optical Lithography: The Science of Microfabrication, John Wiley & Sons (2008).
+## Quick sanity checks
+
+```bash
+python app.py --mode deterministic-demo
+python job_runner.py --recipe sample_data/base_recipe.rcp --layout sample_data/sample_layout.gds --out-dir runs/manual --fail-mode none
+python job_runner.py --recipe sample_data/base_recipe.rcp --layout sample_data/sample_layout.gds --out-dir runs/manual_invalid --fail-mode invalid
+```
+
