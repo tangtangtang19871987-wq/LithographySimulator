@@ -1,0 +1,6 @@
+report("DUV7nm lower-metal LESO demo checks")
+
+m1 = input(17, 0)
+
+m1.width(0.018).output("m1_width", "M1 min-width violations")
+m1.space(0.018).output("m1_space", "M1 side-space violations")

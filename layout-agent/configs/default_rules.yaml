@@ -1,0 +1,10 @@
+checks:
+  min_width_nm: 18
+  min_space_nm: 18
+  min_tip_to_tip_nm: 31
+  min_tip_to_side_nm: 25
+  min_fragment_length_nm: 24
+repair_policy:
+  local_fix_first: true
+  max_local_repairs: 3
+  reject_after_failed_repairs: true

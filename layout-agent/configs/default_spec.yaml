@@ -1,0 +1,54 @@
+spec_id: duv7nm_leso_demo_v1
+count: 30
+canvas:
+  width_nm: 2048
+  height_nm: 2048
+  grid_nm: 1
+process_style:
+  node: 7nm_class
+  lithography: immersion_duv_multipatterned
+  layer_style: lower_metal_leso
+  preferred_direction: horizontal
+  manhattan_only: true
+objectives:
+  density_range: [0.22, 0.38]
+  valid_rate_target: 0.90
+  near_rule_fraction: 0.10
+  hard_case_fraction: 0.15
+families:
+  line_bundle: 0.40
+  line_end_cluster: 0.22
+  broken_bundle: 0.14
+  transition: 0.12
+  tip_gap_stress: 0.08
+  contact_edge_context: 0.04
+distributions:
+  width_nm:
+    type: choice
+    values: [18, 20]
+  pitch_nm:
+    type: mixture
+    components:
+      - {weight: 0.45, values: [36, 40]}
+      - {weight: 0.35, values: [44, 48]}
+      - {weight: 0.20, range: [52, 72]}
+  break_length_nm:
+    type: uniform
+    low: 20
+    high: 60
+  line_end_offset_nm:
+    type: truncated_normal
+    mean: 0
+    std: 8
+    low: -16
+    high: 16
+constraints:
+  min_width_nm: 18
+  min_space_nm: 18
+  min_tip_to_tip_nm: 31
+  min_tip_to_side_nm: 25
+  min_fragment_length_nm: 24
+reporting:
+  save_layout_png: true
+  save_gds: true
+  save_json_reports: true
