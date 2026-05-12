@@ -138,3 +138,62 @@ def test_multiple_anomaly_types(tmp_path: Path) -> None:
     output = tmp_path / "results.json"
     output.write_text(json.dumps(results, indent=2), encoding="utf-8")
     assert output.exists()
+
+
+def test_degenerate_and_self_intersecting_srafs_are_skipped() -> None:
+    analyzer = _make_grid(2, 5)
+    bad_cell = analyzer.cells[0]
+    bad_cell.srafs.append(Polygon([Vec2(0.0, 0.0), Vec2(1.0e-8, 0.0), Vec2(2.0e-8, 0.0)], layer="sraf"))
+    bad_cell.srafs.append(
+        Polygon(
+            [
+                bad_cell.origin + Vec2(-20.0, -20.0),
+                bad_cell.origin + Vec2(20.0, 20.0),
+                bad_cell.origin + Vec2(-20.0, 20.0),
+                bad_cell.origin + Vec2(20.0, -20.0),
+            ],
+            layer="sraf",
+        )
+    )
+    analyzer.analyze_all()
+    assert any("skipped sraf" in warning for warning in analyzer.warnings[0])
+
+
+def test_coincident_contacts_generate_invalid_intercontact_ray_without_crashing() -> None:
+    config = RayCastingConfig(num_angular_rays=4, num_edge_samples=1, max_ray_distance=300.0)
+    analyzer = SRAFConsistencyAnalyzer(config)
+    for cell_id in range(10):
+        origin = Vec2(cell_id * 500.0, 0.0)
+        analyzer.add_unit_cell(
+            UnitCell(
+                cell_id=cell_id,
+                cell_type="coincident",
+                origin=origin,
+                contacts=[_contact(origin), _contact(origin)],
+                srafs=[poly.translated(origin) for poly in _srafs(Vec2(0.0, 0.0))],
+            )
+        )
+    analyzer.analyze_all()
+    assert analyzer.invalid_rays_by_cell[0]
+    assert any("coincident inter-contact" in ray.invalid_reason for ray in analyzer.invalid_rays_by_cell[0])
+
+
+def test_spatial_index_matches_bruteforce_detection() -> None:
+    indexed = _make_grid(4, 4, {9: "shift_right"})
+    brute = _make_grid(4, 4, {9: "shift_right"})
+    brute.config.use_spatial_index = False
+    indexed_scores = indexed.analyze_all()
+    brute_scores = brute.analyze_all()
+    assert {cell_id for cell_id, _ in indexed.get_anomalous_cells(0.3)} == {9}
+    assert {cell_id for cell_id, _ in brute.get_anomalous_cells(0.3)} == {9}
+    assert indexed_scores[9].overall_score == pytest.approx(brute_scores[9].overall_score)
+
+
+def test_ray_residual_csv_export(tmp_path: Path) -> None:
+    analyzer = _make_grid(3, 3, {4: "missing_top"})
+    analyzer.analyze_all()
+    output = tmp_path / "ray_residuals.csv"
+    analyzer.export_ray_residuals_csv(str(output))
+    text = output.read_text(encoding="utf-8")
+    assert text.startswith("cell_id,ray_ordinal,ray_type")
+    assert "4," in text

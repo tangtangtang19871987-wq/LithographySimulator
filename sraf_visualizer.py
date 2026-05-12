@@ -111,10 +111,18 @@ class SRAFVisualizer:
             canvas.polygon(poly.vertices, fill="#9ecae1", stroke="#3182bd", opacity=0.65)
         for poly in cell.contacts:
             canvas.polygon(poly.vertices, fill="#bdbdbd", stroke="#252525", stroke_width=1.4)
-        for ray in self.analyzer.rays_by_cell.get(cell_id, []):
+        score = self.analyzer.scores.get(cell_id)
+        ray_z = []
+        if score is not None:
+            ray_z = [max(score.per_ray_zscore[i : i + 5], default=0.0) for i in range(0, len(score.per_ray_zscore), 5)]
+        for idx, ray in enumerate(self.analyzer.rays_by_cell.get(cell_id, [])):
             origin = ray.origin + cell.origin
             end = origin + ray.direction * min(self.analyzer.config.max_ray_distance, 250.0)
-            canvas.line(origin, end, self.RAY_COLORS[ray.ray_type.value], stroke_width=0.8, opacity=0.30)
+            z_value = ray_z[idx] if idx < len(ray_z) else 0.0
+            if z_value > 3.0:
+                canvas.line(origin, end, "#ff0000", stroke_width=2.2, opacity=0.85)
+            else:
+                canvas.line(origin, end, self.RAY_COLORS[ray.ray_type.value], stroke_width=0.8, opacity=0.30)
         for hit_list in self.analyzer.hits_by_cell.get(cell_id, []):
             for hit in hit_list[:1]:
                 canvas.circle(hit.closest_point + cell.origin, radius=3.0, fill="#e41a1c")

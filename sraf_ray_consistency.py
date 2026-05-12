@@ -18,9 +18,10 @@ from enum import Enum
 import hashlib
 import json
 import math
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 EPS = 1.0e-9
+NO_HIT_DISTANCE = -1.0
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,85 @@ class Polygon:
         return min(xs), min(ys), max(xs), max(ys)
 
 
+    def signed_area(self) -> float:
+        return sum(a.cross(b) for a, b in self.edges()) / 2.0
+
+    def is_ccw(self) -> bool:
+        return self.signed_area() >= 0.0
+
+    def normalized_orientation(self) -> "Polygon":
+        if self.is_ccw():
+            return self
+        return Polygon(list(reversed(self.vertices)), layer=self.layer)
+
+    def contains_point(self, point: Vec2, eps: float = EPS) -> bool:
+        inside = False
+        for a, b in self.edges():
+            ab = b - a
+            ap = point - a
+            if abs(ab.cross(ap)) <= eps and min(a.x, b.x) - eps <= point.x <= max(a.x, b.x) + eps and min(a.y, b.y) - eps <= point.y <= max(a.y, b.y) + eps:
+                return True
+            if (a.y > point.y) != (b.y > point.y):
+                x_cross = (b.x - a.x) * (point.y - a.y) / (b.y - a.y + EPS) + a.x
+                if point.x < x_cross:
+                    inside = not inside
+        return inside
+
+    def has_self_intersection(self, eps: float = EPS) -> bool:
+        edges = self.edges()
+        for i, (a, b) in enumerate(edges):
+            for j, (c, d) in enumerate(edges):
+                if abs(i - j) <= 1 or {i, j} == {0, len(edges) - 1}:
+                    continue
+                if _segments_intersect(a, b, c, d, eps):
+                    return True
+        return False
+
+
+def _orientation(a: Vec2, b: Vec2, c: Vec2) -> float:
+    return (b - a).cross(c - a)
+
+
+def _segments_intersect(a: Vec2, b: Vec2, c: Vec2, d: Vec2, eps: float = EPS) -> bool:
+    def on_segment(p: Vec2, q: Vec2, r: Vec2) -> bool:
+        return (
+            min(p.x, r.x) - eps <= q.x <= max(p.x, r.x) + eps
+            and min(p.y, r.y) - eps <= q.y <= max(p.y, r.y) + eps
+            and abs(_orientation(p, q, r)) <= eps
+        )
+
+    o1 = _orientation(a, b, c)
+    o2 = _orientation(a, b, d)
+    o3 = _orientation(c, d, a)
+    o4 = _orientation(c, d, b)
+    if o1 * o2 < -eps and o3 * o4 < -eps:
+        return True
+    return on_segment(a, c, b) or on_segment(a, d, b) or on_segment(c, a, d) or on_segment(c, b, d)
+
+
+def _rdp(points: List[Vec2], tolerance: float) -> List[Vec2]:
+    if len(points) <= 2 or tolerance <= 0:
+        return points
+    start, end = points[0], points[-1]
+    seg = end - start
+    seg_len = seg.norm()
+    max_dist = -1.0
+    max_index = 0
+    for i, point in enumerate(points[1:-1], start=1):
+        if seg_len < EPS:
+            dist = (point - start).norm()
+        else:
+            dist = abs(seg.cross(point - start)) / seg_len
+        if dist > max_dist:
+            max_dist = dist
+            max_index = i
+    if max_dist > tolerance:
+        left = _rdp(points[: max_index + 1], tolerance)
+        right = _rdp(points[max_index:], tolerance)
+        return left[:-1] + right
+    return [start, end]
+
+
 class RayType(str, Enum):
     ANGULAR = "angular"
     EDGE_NORMAL = "edge_normal"
@@ -188,6 +268,8 @@ class Ray:
     contact_index: int
     ordinal: int
     angle: float
+    valid: bool = True
+    invalid_reason: str = ""
 
 
 @dataclass
@@ -224,6 +306,9 @@ class RayFeature:
     projected_width: float
     skeleton_angle: float
     total_coverage: float
+    valid: bool = True
+    miss: bool = False
+    truncated: bool = False
 
     def as_tuple(self) -> Tuple[float, float, float, float, float]:
         return (
@@ -256,6 +341,7 @@ class ConsistencyScore:
     topology_match: bool
     anomaly_details: List[str] = field(default_factory=list)
     per_ray_zscore: List[float] = field(default_factory=list)
+    insufficient_data: bool = False
 
 
 @dataclass
@@ -291,6 +377,17 @@ class RayCastingConfig:
     score_scale: float = 0.30
     include_halo: bool = False
     halo_radius: float = 0.0
+    polygon_area_epsilon: float = 1.0e-6
+    short_edge_tolerance: float = 1.0
+    ray_origin_nudge: float = 1.0e-3
+    parallel_tolerance: float = 1.0e-9
+    missing_rate_exclusion: float = 0.5
+    min_reference_cells: int = 10
+    exclude_top_fraction: float = 0.05
+    use_local_baseline: bool = False
+    local_baseline_radius: int = 2
+    use_spatial_index: bool = True
+    spatial_bin_size: float = 250.0
 
 
 class SRAFConsistencyAnalyzer:
@@ -304,6 +401,8 @@ class SRAFConsistencyAnalyzer:
         self.features_by_cell: Dict[int, List[RayFeature]] = {}
         self.fingerprints: Dict[int, CellFingerprint] = {}
         self.scores: Dict[int, ConsistencyScore] = {}
+        self.warnings: Dict[int, List[str]] = {}
+        self.invalid_rays_by_cell: Dict[int, List[Ray]] = {}
 
     def add_unit_cell(self, cell: UnitCell) -> None:
         self.cells.append(cell)
@@ -336,18 +435,56 @@ class SRAFConsistencyAnalyzer:
                     matrix[i][j] = matrix[j][i] = d
         return matrix
 
+    def export_ray_residuals_csv(self, path: str) -> None:
+        """Write per-ray features and robust residuals for reproducible debugging."""
+        lines = [
+            "cell_id,ray_ordinal,ray_type,contact_index,hit_count,nearest_distance,projected_width,total_coverage,miss,truncated,max_feature_zscore"
+        ]
+        for cell in sorted(self.cells, key=lambda c: c.cell_id):
+            features = self.features_by_cell.get(cell.cell_id, [])
+            rays = self.rays_by_cell.get(cell.cell_id, [])
+            z = self.scores.get(cell.cell_id, ConsistencyScore(cell.cell_id, cell.cell_type, 0, 0, 0, 0, True)).per_ray_zscore
+            for idx, (ray, feature) in enumerate(zip(rays, features)):
+                z_slice = z[idx * 5 : idx * 5 + 5]
+                lines.append(
+                    f"{cell.cell_id},{ray.ordinal},{ray.ray_type.value},{ray.contact_index},{feature.hit_count},"
+                    f"{feature.nearest_distance:.9g},{feature.projected_width:.9g},{feature.total_coverage:.9g},"
+                    f"{int(feature.miss)},{int(feature.truncated)},{(max(z_slice) if z_slice else 0.0):.9g}"
+                )
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+
     def _analyze_cell(self, cell: UnitCell) -> None:
-        contacts = [self._to_canonical_polygon(p, cell.symmetry) for p in cell.local_contacts()]
-        srafs = [self._to_canonical_polygon(p, cell.symmetry) for p in self._srafs_with_optional_halo(cell)]
+        warnings: List[str] = []
+        contacts = [
+            self._to_canonical_polygon(p, cell.symmetry)
+            for p in self._preprocess_polygons(cell.local_contacts(), "contact", warnings)
+        ]
+        raw_srafs = self._preprocess_polygons(self._srafs_with_optional_halo(cell), "sraf", warnings)
+        srafs = [self._to_canonical_polygon(p, cell.symmetry) for p in raw_srafs]
+        if contacts:
+            filtered_srafs = []
+            for poly in srafs:
+                center = poly.centroid()
+                if any(contact.contains_point(center, self.config.short_edge_tolerance) for contact in contacts):
+                    warnings.append("ignored SRAF with centroid overlapping a contact polygon")
+                    continue
+                filtered_srafs.append(poly)
+            srafs = filtered_srafs
         rays = self._generate_canonical_rays(contacts)
+        valid_rays = [ray for ray in rays if ray.valid]
+        invalid_rays = [ray for ray in rays if not ray.valid]
         skeletons = [self._extract_skeleton(poly, i) for i, poly in enumerate(srafs)]
-        hits = [self._intersect_ray_skeletons(ray, skeletons) for ray in rays]
-        features = [self._features_for_hits(hit_list) for hit_list in hits]
-        fingerprint = self._build_fingerprint(features, rays, contacts, srafs)
-        self.rays_by_cell[cell.cell_id] = rays
+        index = self._build_skeleton_index(skeletons)
+        hits = [self._intersect_ray_skeletons(ray, skeletons, index) for ray in valid_rays]
+        features = [self._features_for_hits(hit_list, ray.valid) for hit_list, ray in zip(hits, valid_rays)]
+        fingerprint = self._build_fingerprint(features, valid_rays, contacts, srafs)
+        self.rays_by_cell[cell.cell_id] = valid_rays
+        self.invalid_rays_by_cell[cell.cell_id] = invalid_rays
         self.hits_by_cell[cell.cell_id] = hits
         self.features_by_cell[cell.cell_id] = features
         self.fingerprints[cell.cell_id] = fingerprint
+        self.warnings[cell.cell_id] = warnings + [ray.invalid_reason for ray in invalid_rays if ray.invalid_reason]
 
     def _srafs_with_optional_halo(self, cell: UnitCell) -> List[Polygon]:
         own = cell.local_srafs()
@@ -370,6 +507,43 @@ class SRAFConsistencyAnalyzer:
         """
         return Polygon([symmetry.to_canonical_point(v) for v in polygon.vertices], layer=polygon.layer)
 
+    def _preprocess_polygons(self, polygons: List[Polygon], role: str, warnings: List[str]) -> List[Polygon]:
+        processed: List[Polygon] = []
+        for idx, polygon in enumerate(polygons):
+            clean = self._clean_polygon(polygon, role, idx, warnings)
+            if clean is not None:
+                processed.append(clean)
+        return processed
+
+    def _clean_polygon(self, polygon: Polygon, role: str, index: int, warnings: List[str]) -> Optional[Polygon]:
+        if len(polygon.vertices) < 3:
+            warnings.append(f"skipped {role} polygon {index}: fewer than three vertices")
+            return None
+        vertices: List[Vec2] = []
+        for vertex in polygon.vertices:
+            if not math.isfinite(vertex.x) or not math.isfinite(vertex.y):
+                warnings.append(f"skipped {role} polygon {index}: non-finite coordinate")
+                return None
+            if not vertices or (vertex - vertices[-1]).norm() > self.config.short_edge_tolerance:
+                vertices.append(vertex)
+        if len(vertices) > 1 and (vertices[0] - vertices[-1]).norm() <= self.config.short_edge_tolerance:
+            vertices.pop()
+        if len(vertices) < 3:
+            warnings.append(f"skipped {role} polygon {index}: collapsed after short-edge merge")
+            return None
+        closed = vertices + [vertices[0]]
+        simplified = _rdp(closed, self.config.short_edge_tolerance)[:-1]
+        if len(simplified) >= 3:
+            vertices = simplified
+        cleaned = Polygon(vertices, layer=polygon.layer).normalized_orientation()
+        if cleaned.area() <= self.config.polygon_area_epsilon:
+            warnings.append(f"skipped {role} polygon {index}: area below tolerance")
+            return None
+        if cleaned.has_self_intersection(self.config.parallel_tolerance):
+            warnings.append(f"skipped {role} polygon {index}: self-intersection detected")
+            return None
+        return cleaned
+
     def _generate_canonical_rays(self, contacts: List[Polygon]) -> List[Ray]:
         rays: List[Ray] = []
         ordered_contacts = sorted(enumerate(contacts), key=lambda item: (item[1].centroid().x, item[1].centroid().y))
@@ -378,10 +552,23 @@ class SRAFConsistencyAnalyzer:
             center = contact.centroid()
             for i in range(self.config.num_angular_rays):
                 angle = 2.0 * math.pi * i / self.config.num_angular_rays
-                rays.append(Ray(center, Vec2(math.cos(angle), math.sin(angle)), RayType.ANGULAR, contact_rank, ordinal, angle))
+                ray = self._make_ray(
+                    center,
+                    Vec2(math.cos(angle), math.sin(angle)),
+                    RayType.ANGULAR,
+                    contact_rank,
+                    ordinal,
+                )
+                rays.append(ray)
                 ordinal += 1
             for edge_index, (a, b) in enumerate(contact.edges()):
                 edge = b - a
+                if edge.norm() <= self.config.short_edge_tolerance:
+                    rays.append(
+                        Ray(a, Vec2(0.0, 0.0), RayType.EDGE_NORMAL, contact_rank, ordinal, 0.0, False, "skipped zero-length contact edge")
+                    )
+                    ordinal += 1
+                    continue
                 normal = Vec2(-edge.y, edge.x).normalized()
                 midpoint = (a + b) * 0.5
                 if normal.dot(midpoint - center) < 0:
@@ -389,7 +576,7 @@ class SRAFConsistencyAnalyzer:
                 for sample in range(self.config.num_edge_samples):
                     t = (sample + 0.5) / self.config.num_edge_samples
                     origin = a * (1.0 - t) + b * t
-                    rays.append(Ray(origin, normal, RayType.EDGE_NORMAL, contact_rank, ordinal, normal.angle()))
+                    rays.append(self._make_ray(origin, normal, RayType.EDGE_NORMAL, contact_rank, ordinal))
                     ordinal += 1
             verts = contact.vertices
             n = len(verts)
@@ -399,12 +586,11 @@ class SRAFConsistencyAnalyzer:
                 next_v = verts[(i + 1) % n]
                 e_prev = (vertex - prev_v).normalized()
                 e_next = (next_v - vertex).normalized()
-                # Exterior bisector: opposite of normalized inward bisector.
                 inward = (Vec2(-e_prev.y, e_prev.x) * orientation + Vec2(-e_next.y, e_next.x) * orientation).normalized()
                 direction = (inward * -1.0).normalized()
                 if direction.norm() < EPS:
                     direction = (vertex - center).normalized()
-                rays.append(Ray(vertex, direction, RayType.VERTEX_BISECTOR, contact_rank, ordinal, direction.angle()))
+                rays.append(self._make_ray(vertex, direction, RayType.VERTEX_BISECTOR, contact_rank, ordinal))
                 ordinal += 1
         if len(ordered_contacts) > 1:
             centroids = [poly.centroid() for _, poly in ordered_contacts]
@@ -412,10 +598,22 @@ class SRAFConsistencyAnalyzer:
                 for j, target in enumerate(centroids):
                     if i == j:
                         continue
-                    direction = (target - origin).normalized()
-                    rays.append(Ray(origin, direction, RayType.INTER_CONTACT, i, ordinal, direction.angle()))
+                    direction = target - origin
+                    if direction.norm() <= self.config.short_edge_tolerance:
+                        rays.append(
+                            Ray(origin, Vec2(0.0, 0.0), RayType.INTER_CONTACT, i, ordinal, 0.0, False, "skipped coincident inter-contact ray")
+                        )
+                    else:
+                        rays.append(self._make_ray(origin, direction, RayType.INTER_CONTACT, i, ordinal))
                     ordinal += 1
         return rays
+
+    def _make_ray(self, origin: Vec2, direction: Vec2, ray_type: RayType, contact_index: int, ordinal: int) -> Ray:
+        unit = direction.normalized()
+        if unit.norm() < EPS:
+            return Ray(origin, unit, ray_type, contact_index, ordinal, 0.0, False, "skipped zero-length ray direction")
+        nudged_origin = origin + unit * self.config.ray_origin_nudge
+        return Ray(nudged_origin, unit, ray_type, contact_index, ordinal, unit.angle())
 
     def _extract_skeleton(self, polygon: Polygon, index: int) -> SRAFSkeleton:
         pts = [(v.x, v.y) for v in polygon.vertices]
@@ -440,13 +638,52 @@ class SRAFConsistencyAnalyzer:
         half_width = max((max(minor_proj) - min(minor_proj)) / 2.0, math.sqrt(max(polygon.area(), 0.0)) * 0.05)
         return SRAFSkeleton(start, end, half_width, index)
 
-    def _intersect_ray_skeletons(self, ray: Ray, skeletons: List[SRAFSkeleton]) -> List[RayHit]:
-        hits: List[RayHit] = []
+    def _build_skeleton_index(self, skeletons: List[SRAFSkeleton]) -> Optional[Dict[Tuple[int, int], List[int]]]:
+        if not self.config.use_spatial_index or not skeletons:
+            return None
+        bin_size = max(self.config.spatial_bin_size, EPS)
+        index: Dict[Tuple[int, int], List[int]] = {}
         for i, skeleton in enumerate(skeletons):
+            min_x = min(skeleton.start.x, skeleton.end.x) - skeleton.half_width
+            max_x = max(skeleton.start.x, skeleton.end.x) + skeleton.half_width
+            min_y = min(skeleton.start.y, skeleton.end.y) - skeleton.half_width
+            max_y = max(skeleton.start.y, skeleton.end.y) + skeleton.half_width
+            for bx in range(math.floor(min_x / bin_size), math.floor(max_x / bin_size) + 1):
+                for by in range(math.floor(min_y / bin_size), math.floor(max_y / bin_size) + 1):
+                    index.setdefault((bx, by), []).append(i)
+        return index
+
+    def _candidate_skeleton_indices(
+        self,
+        ray: Ray,
+        skeletons: List[SRAFSkeleton],
+        index: Optional[Dict[Tuple[int, int], List[int]]],
+    ) -> List[int]:
+        if index is None:
+            return list(range(len(skeletons)))
+        bin_size = max(self.config.spatial_bin_size, EPS)
+        step = max(bin_size / 2.0, 1.0)
+        seen: Set[int] = set()
+        t = 0.0
+        while t <= self.config.max_ray_distance:
+            p = ray.origin + ray.direction * t
+            bx = math.floor(p.x / bin_size)
+            by = math.floor(p.y / bin_size)
+            for nx in (bx - 1, bx, bx + 1):
+                for ny in (by - 1, by, by + 1):
+                    seen.update(index.get((nx, ny), []))
+            t += step
+        return sorted(seen)
+
+    def _intersect_ray_skeletons(self, ray: Ray, skeletons: List[SRAFSkeleton], index: Optional[Dict[Tuple[int, int], List[int]]] = None) -> List[RayHit]:
+        hits: List[RayHit] = []
+        candidate_indices = self._candidate_skeleton_indices(ray, skeletons, index)
+        for i in candidate_indices:
+            skeleton = skeletons[i]
             hit = self._closest_ray_segment_hit(ray, skeleton, i)
             if hit is not None and hit.entry_distance <= self.config.max_ray_distance:
                 hits.append(hit)
-        hits.sort(key=lambda h: h.distance)
+        hits.sort(key=lambda h: (round(h.distance / 1.0e-6), h.skeleton_index))
         return hits
 
     def _closest_ray_segment_hit(self, ray: Ray, skeleton: SRAFSkeleton, skeleton_index: int) -> Optional[RayHit]:
@@ -476,9 +713,11 @@ class SRAFConsistencyAnalyzer:
         closest_ray = p + d * t
         closest_seg = a + v * u
         separation = (closest_ray - closest_seg).norm()
-        if separation > skeleton.half_width + EPS or t < -EPS:
-            return None
         angle_delta = abs(math.sin(ray.direction.angle() - skeleton.angle))
+        if angle_delta <= self.config.parallel_tolerance and separation <= skeleton.half_width + self.config.parallel_tolerance:
+            return None
+        if separation > skeleton.half_width + EPS or t <= self.config.ray_origin_nudge * 0.1:
+            return None
         projected_width = (2.0 * skeleton.half_width) / max(angle_delta, 0.20)
         chord_half = math.sqrt(max(skeleton.half_width**2 - separation**2, 0.0)) / max(angle_delta, 0.20)
         entry = max(0.0, t - chord_half)
@@ -493,12 +732,15 @@ class SRAFConsistencyAnalyzer:
             closest_point=closest_seg,
         )
 
-    def _features_for_hits(self, hits: List[RayHit]) -> RayFeature:
+    def _features_for_hits(self, hits: List[RayHit], valid: bool = True) -> RayFeature:
+        if not valid:
+            return RayFeature(0, NO_HIT_DISTANCE, 0.0, 0.0, 0.0, valid=False, miss=True)
         if not hits:
-            return RayFeature(0, self.config.max_ray_distance, 0.0, 0.0, 0.0)
+            return RayFeature(0, NO_HIT_DISTANCE, 0.0, 0.0, 0.0, valid=True, miss=True)
         nearest = hits[0]
         coverage = sum(max(0.0, h.exit_distance - h.entry_distance) for h in hits)
-        return RayFeature(len(hits), nearest.distance, nearest.projected_width, nearest.skeleton_angle, coverage)
+        truncated = any(h.exit_distance >= self.config.max_ray_distance - EPS for h in hits)
+        return RayFeature(len(hits), nearest.distance, nearest.projected_width, nearest.skeleton_angle, coverage, valid=True, miss=False, truncated=truncated)
 
     def _build_fingerprint(
         self,
@@ -611,38 +853,122 @@ class SRAFConsistencyAnalyzer:
             by_type.setdefault(cell.cell_type, []).append(cell)
         self.scores = {}
         for cell_type, cells in by_type.items():
-            fps = [self.fingerprints[cell.cell_id] for cell in cells]
-            rdf_ref = self._column_median([fp.rdf for fp in fps])
-            angular_ref = self._column_median([fp.angular_profile for fp in fps])
-            moment_ref = self._column_median([fp.hu_moments for fp in fps])
-            feature_rows = [fp.feature_vector for fp in fps]
-            feature_ref = self._column_median(feature_rows)
-            abs_dev_rows = [[abs(value - ref) for value, ref in zip(row, feature_ref)] for row in feature_rows]
-            feature_mad = self._column_median(abs_dev_rows)
-            floors = self._feature_noise_vector(len(feature_ref))
-            feature_scale = [max(mad * 1.4826, floor) for mad, floor in zip(feature_mad, floors)]
-            topology_ref = self._majority([fp.topology_signature for fp in fps])
+            baseline_cells = self._select_baseline_cells(cells)
+            global_refs = self._reference_bundle(baseline_cells)
             for cell in cells:
-                fp = self.fingerprints[cell.cell_id]
-                radial = self._normalized_l1(fp.rdf, rdf_ref, 0.02)
-                angular = self._normalized_l1(fp.angular_profile, angular_ref, 0.01)
-                moment = self._normalized_l1(fp.hu_moments, moment_ref, 0.05)
-                topology_match = fp.topology_signature == topology_ref
-                raw = 0.30 * radial + 0.30 * angular + 0.20 * moment + (0.0 if topology_match else 0.20)
-                overall = min(1.0, raw / max(self.config.score_scale, EPS))
-                z = [abs((value - ref) / scale) for value, ref, scale in zip(fp.feature_vector, feature_ref, feature_scale)]
-                details = self._anomaly_details(radial, angular, moment, topology_match, z)
-                self.scores[cell.cell_id] = ConsistencyScore(
-                    cell.cell_id,
-                    cell_type,
-                    overall,
-                    radial,
-                    angular,
-                    moment,
-                    topology_match,
-                    details,
-                    z,
-                )
+                reference_cells = baseline_cells
+                if self.config.use_local_baseline and cell.grid_position is not None:
+                    local = [
+                        candidate
+                        for candidate in baseline_cells
+                        if candidate.grid_position is not None
+                        and max(
+                            abs(candidate.grid_position[0] - cell.grid_position[0]),
+                            abs(candidate.grid_position[1] - cell.grid_position[1]),
+                        )
+                        <= self.config.local_baseline_radius
+                    ]
+                    if len(local) >= min(self.config.min_reference_cells, len(baseline_cells)):
+                        reference_cells = local
+                refs = self._reference_bundle(reference_cells) if reference_cells is not baseline_cells else global_refs
+                self._score_one_cell(cell, cell_type, refs, len(reference_cells) < self.config.min_reference_cells)
+
+    def _select_baseline_cells(self, cells: List[UnitCell]) -> List[UnitCell]:
+        if len(cells) < self.config.min_reference_cells or self.config.exclude_top_fraction <= 0:
+            return cells
+        refs = self._reference_bundle(cells)
+        ranked = []
+        for cell in cells:
+            fp = self.fingerprints[cell.cell_id]
+            radial = self._normalized_l1(fp.rdf, refs["rdf"], 0.02)
+            angular = self._normalized_l1(fp.angular_profile, refs["angular"], 0.01)
+            moment = self._normalized_l1(fp.hu_moments, refs["moment"], 0.05)
+            ranked.append((0.30 * radial + 0.30 * angular + 0.20 * moment, cell))
+        drop_count = min(len(cells) - self.config.min_reference_cells, max(1, int(len(cells) * self.config.exclude_top_fraction)))
+        if drop_count <= 0:
+            return cells
+        dropped = {cell.cell_id for _, cell in sorted(ranked, key=lambda item: item[0], reverse=True)[:drop_count]}
+        return [cell for cell in cells if cell.cell_id not in dropped]
+
+    def _reference_bundle(self, cells: List[UnitCell]) -> Dict[str, object]:
+        fps = [self.fingerprints[cell.cell_id] for cell in cells]
+        feature_rows = [fp.feature_vector for fp in fps]
+        feature_ref = self._column_median(feature_rows)
+        abs_dev_rows = [[abs(value - ref) for value, ref in zip(row, feature_ref)] for row in feature_rows]
+        feature_mad = self._column_median(abs_dev_rows)
+        floors = self._feature_noise_vector(len(feature_ref))
+        feature_scale = [max(mad * 1.4826, floor) for mad, floor in zip(feature_mad, floors)]
+        missing_rates = self._feature_missing_rates(feature_rows)
+        return {
+            "rdf": self._column_median([fp.rdf for fp in fps]),
+            "angular": self._column_median([fp.angular_profile for fp in fps]),
+            "moment": self._column_median([fp.hu_moments for fp in fps]),
+            "feature_ref": feature_ref,
+            "feature_scale": feature_scale,
+            "missing_rates": missing_rates,
+            "topology": self._majority([fp.topology_signature for fp in fps]) if fps else "",
+        }
+
+    def _score_one_cell(self, cell: UnitCell, cell_type: str, refs: Dict[str, object], insufficient_data: bool) -> None:
+        fp = self.fingerprints[cell.cell_id]
+        radial = self._normalized_l1(fp.rdf, refs["rdf"], 0.02)  # type: ignore[arg-type]
+        angular = self._normalized_l1(fp.angular_profile, refs["angular"], 0.01)  # type: ignore[arg-type]
+        moment = self._normalized_l1(fp.hu_moments, refs["moment"], 0.05)  # type: ignore[arg-type]
+        topology_match = fp.topology_signature == refs["topology"]
+        raw = 0.30 * radial + 0.30 * angular + 0.20 * moment + (0.0 if topology_match else 0.20)
+        if insufficient_data:
+            raw *= 0.5
+        overall = min(1.0, raw / max(self.config.score_scale, EPS))
+        z = self._per_feature_zscore(
+            fp.feature_vector,
+            refs["feature_ref"],  # type: ignore[arg-type]
+            refs["feature_scale"],  # type: ignore[arg-type]
+            refs["missing_rates"],  # type: ignore[arg-type]
+        )
+        details = self._anomaly_details(radial, angular, moment, topology_match, z)
+        if insufficient_data:
+            details.append("reference sample below recommended minimum; review manually")
+        details.extend(self.warnings.get(cell.cell_id, []))
+        self.scores[cell.cell_id] = ConsistencyScore(
+            cell.cell_id,
+            cell_type,
+            overall,
+            radial,
+            angular,
+            moment,
+            topology_match,
+            details,
+            z,
+            insufficient_data,
+        )
+
+    def _feature_missing_rates(self, feature_rows: List[List[float]]) -> List[float]:
+        if not feature_rows:
+            return []
+        rates: List[float] = []
+        for col in range(len(feature_rows[0])):
+            if col % 5 == 1:
+                rates.append(sum(1 for row in feature_rows if row[col] == NO_HIT_DISTANCE) / len(feature_rows))
+            else:
+                rates.append(0.0)
+        return rates
+
+    def _per_feature_zscore(
+        self,
+        values: List[float],
+        refs: List[float],
+        scales: List[float],
+        missing_rates: List[float],
+    ) -> List[float]:
+        z: List[float] = []
+        for idx, (value, ref, scale) in enumerate(zip(values, refs, scales)):
+            if idx % 5 == 1 and missing_rates[idx] > self.config.missing_rate_exclusion:
+                z.append(0.0)
+            elif idx % 5 == 1 and value == NO_HIT_DISTANCE and ref == NO_HIT_DISTANCE:
+                z.append(0.0)
+            else:
+                z.append(abs((value - ref) / max(scale, EPS)))
+        return z
 
     def _feature_noise_vector(self, size: int) -> List[float]:
         floors = [0.5, self.config.distance_noise_floor, self.config.width_noise_floor, 0.02, self.config.width_noise_floor]
