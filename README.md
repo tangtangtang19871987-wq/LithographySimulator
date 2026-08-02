@@ -22,6 +22,21 @@ Right now, although it mostly works, a lot could still be done to improve it. Ex
 - [ ] 2D solver for lithography recipe generation
 - [x] Allow for more complicated light sources like quasar or quadrupole
 
+## Copilot CLI dashboard
+
+The repository also contains a small, standard-library-only desktop dashboard
+for supervising multiple Copilot (or other) command-line processes:
+
+```bash
+python copilot_dashboard.py
+```
+
+Each session has its own command, working directory, environment variables,
+terminal output, input box, lifecycle status, and stop control. On POSIX systems
+the child receives a pseudo-terminal, so interactive CLIs retain their normal
+terminal behaviour. Environment values are supplied one `KEY=VALUE` per line;
+they are applied only to that session and do not modify the dashboard process.
+
 ## Acknowledgment and Citations
 1. T.-S. Gau et al., “Ultra-fast aerial image simulation algorithm using wavelength scaling and fast Fourier transformation to speed up calculation by more than three orders of magnitude,” JM3 22(2), 023201, SPIE (2023) [doi:10.1117/1.JMM.22.2.023201].
 
