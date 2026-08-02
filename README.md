@@ -32,10 +32,42 @@ python copilot_dashboard.py
 ```
 
 Each session has its own command, working directory, environment variables,
-terminal output, input box, lifecycle status, and stop control. On POSIX systems
-the child receives a pseudo-terminal, so interactive CLIs retain their normal
-terminal behaviour. Environment values are supplied one `KEY=VALUE` per line;
-they are applied only to that session and do not modify the dashboard process.
+terminal output, input box, lifecycle status, progress indicator, and lifecycle
+controls. Configurations can be saved as reusable profiles (under
+`~/.config/copilot-dashboard/profiles.json`), while complete session logs can be
+exported on demand. On POSIX systems the child receives a pseudo-terminal, so
+interactive CLIs retain their normal terminal behaviour. Environment values are
+supplied one `KEY=VALUE` per line; they are applied only to that session and do
+not modify the dashboard process.
+
+Additional reliability features include bounded on-screen log retention,
+incremental UTF-8 decoding, atomic profile writes, command/directory validation,
+explicit process states, non-zero exit highlighting, and graceful termination
+with automatic forced-kill fallback. The dashboard never invokes commands via a
+shell, which avoids unintended shell expansion of configuration values.
+
+### Design research
+
+The feature selection follows useful patterns from established open-source
+terminal and process-management projects:
+
+* [Process Compose](https://github.com/F1bonacc1/process-compose) demonstrates
+  the value of per-process lifecycle state, restart controls, log visibility,
+  and reusable configuration.
+* [Wave Terminal](https://github.com/wavetermdev/waveterm) and
+  [Tabby](https://github.com/Eugeny/tabby) demonstrate session-oriented tabs,
+  persistent connection profiles, and immediate interactive terminal I/O.
+* [ttyd](https://github.com/tsl0922/ttyd) demonstrates why interactive programs
+  need a pseudo-terminal rather than ordinary stdout pipes.
+* [pyte](https://github.com/selectel/pyte) is a useful future option if full
+  terminal emulation (cursor movement, alternate screen, and colours) becomes
+  more important than keeping this MVP standard-library-only.
+
+The current UI intentionally stops short of terminal emulation: it presents a
+safe, readable text transcript and strips ANSI control sequences. Secrets are
+also stored as plain text when a profile is saved (with owner-only permissions
+on POSIX), so tokens should preferably be inherited from the parent environment
+or a platform credential manager.
 
 ## Acknowledgment and Citations
 1. T.-S. Gau et al., “Ultra-fast aerial image simulation algorithm using wavelength scaling and fast Fourier transformation to speed up calculation by more than three orders of magnitude,” JM3 22(2), 023201, SPIE (2023) [doi:10.1117/1.JMM.22.2.023201].
